@@ -33,7 +33,15 @@ class Quiz(BaseModel):
 
 
 async def verify_quiz_correctness(quiz: Dict[str, Any]) -> bool:
-    """Security & Self-Evaluation Guardrail to verify quiz safety and correctness."""
+    """Security & Self-Evaluation Guardrail to verify quiz safety and correctness.
+    
+    Args:
+        quiz (Dict[str, Any]): A dictionary representation of the generated quiz containing
+            the fields 'question', 'options', 'correct_option', and 'explanation'.
+            
+    Returns:
+        bool: True if the quiz passes all validation checks, False otherwise.
+    """
     # Redact any accidental PII from input before evaluating
     quiz_question = PIIRedactor.redact(quiz['question'])
     quiz_options = [PIIRedactor.redact(o) for o in quiz['options']]
@@ -73,6 +81,15 @@ async def breakdown_topic(topic: str) -> List[str]:
     """Asynchronously queries Gemini to subdivide a large topic into a sequential list of subjects.
     
     Includes Human-in-the-Loop confirmation before initializing the profile.
+    
+    Args:
+        topic (str): The high-level master topic the student wishes to learn (e.g. "Python").
+        
+    Returns:
+        List[str]: A list of sequential, progressive sub-topics/subjects making up the curriculum.
+        
+    Raises:
+        ValueError: If curriculum generation fails, returning explicit recovery instructions for the LLM.
     """
     # Redact input PII safely
     sanitized_topic = PIIRedactor.redact(topic)
@@ -113,17 +130,30 @@ async def breakdown_topic(topic: str) -> List[str]:
             tracer.set_outcome(f"Curriculum generated successfully with subjects: {subjects}", success=True)
             return subjects
         except Exception as e:
-            fallback = [f"Introduction to {sanitized_topic}", f"Intermediate concepts in {sanitized_topic}", f"Advanced {sanitized_topic}"]
-            manager = StudentProfileManager()
-            await manager.initialize_profile(sanitized_topic, fallback)
-            tracer.set_outcome(f"Curriculum generation failed: {e}. Fallback outline initialized.", success=False)
-            return fallback
+            tracer.set_outcome(f"Curriculum generation failed: {e}", success=False)
+            # Raise structured error with explicit recovery instructions for the LLM
+            raise ValueError(
+                f"Curriculum generation failed due to network or service error: {e}. "
+                f"RECOVERY INSTRUCTION: Please recover gracefully by immediately asking the student "
+                f"to manually name 3 specific sub-topics/subjects they would like to learn about '{sanitized_topic}'. "
+                f"Once they name them, proceed to teach the first one manually."
+            )
 
 
 async def generate_quiz(subject: str, difficulty: str) -> Dict[str, Any]:
     """Asynchronously generates a single high-quality multiple choice quiz question.
     
     Includes an automated Self-Evaluation Guardrail.
+    
+    Args:
+        subject (str): The specific syllabus subject to test the student on (e.g., "Variables").
+        difficulty (str): The target difficulty tier ('beginner', 'intermediate', 'advanced').
+        
+    Returns:
+        Dict[str, Any]: A dictionary containing 'question', 'options', 'correct_option', and 'explanation'.
+        
+    Raises:
+        ValueError: If quiz generation fails repeatedly, returning explicit recovery instructions for the LLM.
     """
     sanitized_subject = PIIRedactor.redact(subject)
     
@@ -158,21 +188,27 @@ async def generate_quiz(subject: str, difficulty: str) -> Dict[str, Any]:
             except Exception as e:
                 pass
                 
-        # Default fallback quiz if API fails or guardrail keeps rejecting
-        fallback_quiz = {
-            "question": f"What is a fundamental concept of {sanitized_subject}?",
-            "options": ["Option A", "Option B", "Option C", "Option D"],
-            "correct_option": "Option A",
-            "explanation": "This is a fallback explanation as the API failed."
-        }
-        tracer.set_outcome("Quiz generation failed after all attempts. Falling back to default question.", success=False)
-        return fallback_quiz
+        # Raise structured error with explicit recovery instructions for the LLM
+        tracer.set_outcome("Quiz generation failed after all attempts. Raising recovery instructions to LLM.", success=False)
+        raise ValueError(
+            f"Quiz generation failed after multiple attempts. "
+            f"RECOVERY INSTRUCTION: Please recover gracefully by dynamically constructing a single, direct, "
+            f"open-ended conceptual question about '{sanitized_subject}' yourself right now. "
+            f"Ask the student to write out their answer/explanation, and grade their textual response manually."
+        )
 
 
 async def assess_understanding(subject: str, correct: bool) -> Dict[str, Any]:
     """Asynchronously evaluates user's quiz performance and updates their progress.
     
     Includes Human-In-The-Loop Confirmation before saving critical progress.
+    
+    Args:
+        subject (str): The subject being graded and recorded (e.g., "Loops").
+        correct (bool): True if the student answered correctly, False otherwise.
+        
+    Returns:
+        Dict[str, Any]: A dictionary containing the updated subject progress metadata (score, status).
     """
     sanitized_subject = PIIRedactor.redact(subject)
     
@@ -199,7 +235,11 @@ async def assess_understanding(subject: str, correct: bool) -> Dict[str, Any]:
 
 
 async def get_progress_summary() -> str:
-    """Asynchronously retrieves a friendly summary of the student's current curriculum and mastery levels."""
+    """Asynchronously retrieves a friendly summary of the student's current curriculum and mastery levels.
+    
+    Returns:
+        str: A multi-line progress report summarizing all subjects, mastery levels, and quiz counts.
+    """
     with trace_action("get_progress_summary", intent="Retrieve comprehensive learning progress summary") as tracer:
         manager = StudentProfileManager()
         await manager.load_profile()
