@@ -6,7 +6,9 @@ from rich.prompt import Confirm
 from rich.console import Console
 from google import genai
 from google.genai import types
+
 from tutor_agent.memory import StudentProfileManager
+from tutor_agent.observability import trace_action, PIIRedactor
 
 console = Console()
 
@@ -32,32 +34,39 @@ class Quiz(BaseModel):
 
 async def verify_quiz_correctness(quiz: Dict[str, Any]) -> bool:
     """Security & Self-Evaluation Guardrail to verify quiz safety and correctness."""
-    client = get_gemini_client()
-    prompt = (
-        f"You are a Quality Assurance and Safety validator.\n"
-        f"Analyze this multiple-choice quiz question for security, accuracy, and clarity:\n"
-        f"Question: {quiz['question']}\n"
-        f"Options: {quiz['options']}\n"
-        f"Correct Answer: {quiz['correct_option']}\n"
-        f"Explanation: {quiz['explanation']}\n\n"
-        f"Check that:\n"
-        f"1. The correct option is accurate and matches the question.\n"
-        f"2. The question is entirely safe and appropriate for all students.\n"
-        f"3. There is no ambiguity in the options.\n"
-        f"Reply with exactly 'VALID' if it is perfect, or 'INVALID' if there are errors."
-    )
+    # Redact any accidental PII from input before evaluating
+    quiz_question = PIIRedactor.redact(quiz['question'])
+    quiz_options = [PIIRedactor.redact(o) for o in quiz['options']]
     
-    try:
-        response = await client.aio.models.generate_content(
-            model="gemini-3.5-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(temperature=0.1)
+    with trace_action("verify_quiz_correctness", intent="Perform QA self-evaluation on generated quiz question", extra_attrs={"question": quiz_question}) as tracer:
+        client = get_gemini_client()
+        prompt = (
+            f"You are a Quality Assurance and Safety validator.\n"
+            f"Analyze this multiple-choice quiz question for security, accuracy, and clarity:\n"
+            f"Question: {quiz_question}\n"
+            f"Options: {quiz_options}\n"
+            f"Correct Answer: {quiz['correct_option']}\n"
+            f"Explanation: {quiz['explanation']}\n\n"
+            f"Check that:\n"
+            f"1. The correct option is accurate and matches the question.\n"
+            f"2. The question is entirely safe and appropriate for all students.\n"
+            f"3. There is no ambiguity in the options.\n"
+            f"Reply with exactly 'VALID' if it is perfect, or 'INVALID' if there are errors."
         )
-        verdict = response.text.strip().upper()
-        return "VALID" in verdict
-    except Exception:
-        # If verification fails due to network, default to True for resilience
-        return True
+        
+        try:
+            response = await client.aio.models.generate_content(
+                model="gemini-3.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(temperature=0.1)
+            )
+            verdict = response.text.strip().upper()
+            is_valid = "VALID" in verdict
+            tracer.set_outcome(f"QA evaluation finished. Valid: {is_valid}", success=is_valid, details=verdict)
+            return is_valid
+        except Exception as e:
+            tracer.set_outcome(f"QA evaluation failed due to exception: {e}", success=False)
+            return True
 
 
 async def breakdown_topic(topic: str) -> List[str]:
@@ -65,44 +74,50 @@ async def breakdown_topic(topic: str) -> List[str]:
     
     Includes Human-in-the-Loop confirmation before initializing the profile.
     """
-    client = get_gemini_client()
-    prompt = f"Break down the topic '{topic}' into a logical, sequential list of 3 to 5 important sub-topics for learning."
+    # Redact input PII safely
+    sanitized_topic = PIIRedactor.redact(topic)
     
-    try:
-        response = await client.aio.models.generate_content(
-            model="gemini-3-flash",  # Strategic model routing: Use fast gemini-3-flash for structured planner tasks
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=Curriculum,
-                temperature=0.2,
+    with trace_action("breakdown_topic", intent=f"Generate curriculum outline for topic: {sanitized_topic}", extra_attrs={"topic": sanitized_topic}) as tracer:
+        client = get_gemini_client()
+        prompt = f"Break down the topic '{sanitized_topic}' into a logical, sequential list of 3 to 5 important sub-topics for learning."
+        
+        try:
+            response = await client.aio.models.generate_content(
+                model="gemini-3-flash",  # Strategic model routing: Use fast gemini-3-flash for structured planner tasks
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=Curriculum,
+                    temperature=0.2,
+                )
             )
-        )
-        curriculum = Curriculum.model_validate_json(response.text)
-        subjects = curriculum.subjects
-        
-        # Human-In-The-Loop Confirmation Hook
-        console.print(f"\n[bold gold3]🤖 [TutorSystem] Generated Curriculum Outline for '{topic}':[/bold gold3]")
-        for i, sub in enumerate(subjects, 1):
-            console.print(f"   {i}. {sub}")
+            curriculum = Curriculum.model_validate_json(response.text)
+            subjects = curriculum.subjects
             
-        # Verify if running in interactive terminal
-        if sys.stdin.isatty():
-            confirmed = Confirm.ask("\n[bold gold3]Do you approve of this curriculum outline?[/bold gold3]", default=True)
-            if not confirmed:
-                console.print("[info]Modifying curriculum dynamically... (Adding default overview)[/info]")
-                subjects = [f"{topic} Overview"] + subjects[:3]
-        
-        # Initialize student profile with these topics asynchronously
-        manager = StudentProfileManager()
-        await manager.initialize_profile(topic, subjects)
-        
-        return subjects
-    except Exception as e:
-        fallback = [f"Introduction to {topic}", f"Intermediate concepts in {topic}", f"Advanced {topic}"]
-        manager = StudentProfileManager()
-        await manager.initialize_profile(topic, fallback)
-        return fallback
+            # Human-In-The-Loop Confirmation Hook
+            console.print(f"\n[bold gold3]🤖 [TutorSystem] Generated Curriculum Outline for '{sanitized_topic}':[/bold gold3]")
+            for i, sub in enumerate(subjects, 1):
+                console.print(f"   {i}. {sub}")
+                
+            # Verify if running in interactive terminal
+            if sys.stdin.isatty():
+                confirmed = Confirm.ask("\n[bold gold3]Do you approve of this curriculum outline?[/bold gold3]", default=True)
+                if not confirmed:
+                    console.print("[info]Modifying curriculum dynamically... (Adding default overview)[/info]")
+                    subjects = [f"{sanitized_topic} Overview"] + subjects[:3]
+            
+            # Initialize student profile with these topics asynchronously
+            manager = StudentProfileManager()
+            await manager.initialize_profile(sanitized_topic, subjects)
+            
+            tracer.set_outcome(f"Curriculum generated successfully with subjects: {subjects}", success=True)
+            return subjects
+        except Exception as e:
+            fallback = [f"Introduction to {sanitized_topic}", f"Intermediate concepts in {sanitized_topic}", f"Advanced {sanitized_topic}"]
+            manager = StudentProfileManager()
+            await manager.initialize_profile(sanitized_topic, fallback)
+            tracer.set_outcome(f"Curriculum generation failed: {e}. Fallback outline initialized.", success=False)
+            return fallback
 
 
 async def generate_quiz(subject: str, difficulty: str) -> Dict[str, Any]:
@@ -110,42 +125,48 @@ async def generate_quiz(subject: str, difficulty: str) -> Dict[str, Any]:
     
     Includes an automated Self-Evaluation Guardrail.
     """
-    client = get_gemini_client()
-    prompt = (
-        f"Generate a single multiple-choice quiz question about '{subject}'.\n"
-        f"The difficulty level is: {difficulty}.\n"
-        f"Ensure there are exactly 4 distinct options."
-    )
+    sanitized_subject = PIIRedactor.redact(subject)
     
-    for attempt in range(2):  # Self-evaluation loop: retry once if guardrail fails
-        try:
-            response = await client.aio.models.generate_content(
-                model="gemini-3.5-flash",  # Strategic model routing: Use gemini-3.5-flash for high reasoning teaching tasks
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=Quiz,
-                    temperature=0.7,
+    with trace_action("generate_quiz", intent=f"Generate dynamic quiz question for subject: {sanitized_subject}", extra_attrs={"subject": sanitized_subject, "difficulty": difficulty}) as tracer:
+        client = get_gemini_client()
+        prompt = (
+            f"Generate a single multiple-choice quiz question about '{sanitized_subject}'.\n"
+            f"The difficulty level is: {difficulty}.\n"
+            f"Ensure there are exactly 4 distinct options."
+        )
+        
+        for attempt in range(2):  # Self-evaluation loop: retry once if guardrail fails
+            try:
+                response = await client.aio.models.generate_content(
+                    model="gemini-3.5-flash",  # Strategic model routing: Use gemini-3.5-flash for high reasoning teaching tasks
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=Quiz,
+                        temperature=0.7,
+                    )
                 )
-            )
-            quiz_data = Quiz.model_validate_json(response.text).model_dump()
-            
-            # Run Self-Evaluation Guardrail
-            is_valid = await verify_quiz_correctness(quiz_data)
-            if is_valid:
-                return quiz_data
-            else:
-                console.print(f"[warning]⚠️ Guardrail alert: Regenerating quiz for {subject}...[/warning]")
-        except Exception:
-            pass
-            
-    # Default fallback quiz if API fails or guardrail keeps rejecting
-    return {
-        "question": f"What is a fundamental concept of {subject}?",
-        "options": ["Option A", "Option B", "Option C", "Option D"],
-        "correct_option": "Option A",
-        "explanation": "This is a fallback explanation as the API failed."
-    }
+                quiz_data = Quiz.model_validate_json(response.text).model_dump()
+                
+                # Run Self-Evaluation Guardrail
+                is_valid = await verify_quiz_correctness(quiz_data)
+                if is_valid:
+                    tracer.set_outcome(f"Quiz question generated and successfully passed validation on attempt {attempt+1}.", success=True)
+                    return quiz_data
+                else:
+                    console.print(f"[warning]⚠️ Guardrail alert: Regenerating quiz for {sanitized_subject}...[/warning]")
+            except Exception as e:
+                pass
+                
+        # Default fallback quiz if API fails or guardrail keeps rejecting
+        fallback_quiz = {
+            "question": f"What is a fundamental concept of {sanitized_subject}?",
+            "options": ["Option A", "Option B", "Option C", "Option D"],
+            "correct_option": "Option A",
+            "explanation": "This is a fallback explanation as the API failed."
+        }
+        tracer.set_outcome("Quiz generation failed after all attempts. Falling back to default question.", success=False)
+        return fallback_quiz
 
 
 async def assess_understanding(subject: str, correct: bool) -> Dict[str, Any]:
@@ -153,26 +174,35 @@ async def assess_understanding(subject: str, correct: bool) -> Dict[str, Any]:
     
     Includes Human-In-The-Loop Confirmation before saving critical progress.
     """
-    manager = StudentProfileManager()
-    await manager.load_profile()
+    sanitized_subject = PIIRedactor.redact(subject)
     
-    # Human-In-The-Loop Confirmation Hook for State Modification
-    result_str = "[green]CORRECT[/green]" if correct else "[red]INCORRECT[/red]"
-    console.print(f"\n[bold gold3]🤖 [TutorSystem] Assessment result for '{subject}': {result_str}[/bold gold3]")
-    
-    if sys.stdin.isatty():
-        confirmed = Confirm.ask("[bold gold3]Do you allow the agent to update your mastery score?[/bold gold3]", default=True)
-        if not confirmed:
-            console.print("[info]Score update canceled by user. Profile remains unchanged.[/info]")
-            subjects = manager.profile.get("subjects", {})
-            return subjects.get(subject, {"status": "in_progress", "score": 0, "quizzes_taken": 0, "quizzes_passed": 0})
+    with trace_action("assess_understanding", intent=f"Assess performance on quiz for subject: {sanitized_subject}", extra_attrs={"subject": sanitized_subject, "correct_answer": correct}) as tracer:
+        manager = StudentProfileManager()
+        await manager.load_profile()
+        
+        # Human-In-The-Loop Confirmation Hook for State Modification
+        result_str = "[green]CORRECT[/green]" if correct else "[red]INCORRECT[/red]"
+        console.print(f"\n[bold gold3]🤖 [TutorSystem] Assessment result for '{sanitized_subject}': {result_str}[/bold gold3]")
+        
+        if sys.stdin.isatty():
+            confirmed = Confirm.ask("[bold gold3]Do you allow the agent to update your mastery score?[/bold gold3]", default=True)
+            if not confirmed:
+                console.print("[info]Score update canceled by user. Profile remains unchanged.[/info]")
+                subjects = manager.profile.get("subjects", {})
+                fallback_data = subjects.get(sanitized_subject, {"status": "in_progress", "score": 0, "quizzes_taken": 0, "quizzes_passed": 0})
+                tracer.set_outcome("User denied permission to adjust profile score. Modification skipped.", success=True)
+                return fallback_data
 
-    updated_subject = await manager.update_subject_score(subject, correct)
-    return updated_subject
+        updated_subject = await manager.update_subject_score(sanitized_subject, correct)
+        tracer.set_outcome(f"User score successfully updated: {updated_subject['score']}% (mastery: {updated_subject['status']})", success=True)
+        return updated_subject
 
 
 async def get_progress_summary() -> str:
     """Asynchronously retrieves a friendly summary of the student's current curriculum and mastery levels."""
-    manager = StudentProfileManager()
-    await manager.load_profile()
-    return await manager.get_profile_summary()
+    with trace_action("get_progress_summary", intent="Retrieve comprehensive learning progress summary") as tracer:
+        manager = StudentProfileManager()
+        await manager.load_profile()
+        summary = await manager.get_profile_summary()
+        tracer.set_outcome("Learning progress report summarized and retrieved successfully.", success=True)
+        return summary
