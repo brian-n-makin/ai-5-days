@@ -9,6 +9,7 @@ setup(
         "rich>=13.0.0",
         "opentelemetry-api>=1.20.0",
         "opentelemetry-sdk>=1.20.0",
+        "aiosqlite>=0.20.0",
     ],
     entry_points={
         "console_scripts": [

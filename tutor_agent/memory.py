@@ -1,29 +1,45 @@
 import json
 import os
+import aiosqlite
 from typing import Dict, Any, Optional, List
 
 class StudentProfileManager:
-    """Manages persistent student profiles tracking curriculum progress and mastery scores."""
+    """Manages persistent student profiles tracking curriculum progress and mastery scores using a SQLite database."""
 
-    def __init__(self, file_path: str = "student_profile.json"):
-        self.file_path = file_path
+    def __init__(self, db_path: str = "student_profile.db"):
+        self.db_path = db_path
         self.profile: Dict[str, Any] = {}
 
-    def load_profile(self) -> Optional[Dict[str, Any]]:
-        """Loads the student profile from the persistent store if it exists."""
-        if os.path.exists(self.file_path):
-            try:
-                with open(self.file_path, "r", encoding="utf-8") as f:
-                    self.profile = json.load(f)
+    async def init_db(self) -> None:
+        """Asynchronously initializes the database and creates the profile table if it does not exist."""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute('''
+                CREATE TABLE IF NOT EXISTS profile (
+                    id INTEGER PRIMARY KEY,
+                    topic TEXT NOT NULL,
+                    subjects TEXT NOT NULL
+                )
+            ''')
+            await db.commit()
+
+    async def load_profile(self) -> Optional[Dict[str, Any]]:
+        """Asynchronously loads the student profile from the database."""
+        await self.init_db()
+        async with aiosqlite.connect(self.db_path) as db:
+            async with db.execute('SELECT topic, subjects FROM profile ORDER BY id DESC LIMIT 1') as cursor:
+                row = await cursor.fetchone()
+                if row:
+                    self.profile = {
+                        "topic": row[0],
+                        "subjects": json.loads(row[1])
+                    }
                     return self.profile
-            except (json.JSONDecodeError, IOError) as e:
-                # Fallback or re-raise based on severity; for safety, return empty and log
-                self.profile = {}
-                return None
+        self.profile = {}
         return None
 
-    def initialize_profile(self, topic: str, subjects: List[str]) -> Dict[str, Any]:
-        """Initializes a brand new curriculum profile for a given topic."""
+    async def initialize_profile(self, topic: str, subjects: List[str]) -> Dict[str, Any]:
+        """Asynchronously initializes a brand new curriculum profile for a given topic."""
+        await self.init_db()
         self.profile = {
             "topic": topic,
             "subjects": {
@@ -36,24 +52,36 @@ class StudentProfileManager:
                 for subj in subjects
             }
         }
-        self.save_profile()
+        
+        async with aiosqlite.connect(self.db_path) as db:
+            # Clear previous profile data to start fresh
+            await db.execute('DELETE FROM profile')
+            await db.execute(
+                'INSERT INTO profile (topic, subjects) VALUES (?, ?)',
+                (topic, json.dumps(self.profile["subjects"]))
+            )
+            await db.commit()
+            
         return self.profile
 
-    def update_subject_score(self, subject: str, correct: bool) -> Dict[str, Any]:
-        """Updates mastery scores and flags based on quiz correctness."""
-        if not self.profile or "subjects" not in self.profile:
-            raise ValueError("No profile initialized.")
+    async def update_subject_score(self, subject: str, correct: bool) -> Dict[str, Any]:
+        """Asynchronously updates mastery scores and flags based on quiz correctness."""
+        # Ensure profile is loaded
+        if not self.profile:
+            await self.load_profile()
+            if not self.profile:
+                raise ValueError("No profile initialized in database.")
         
-        if subject not in self.profile["subjects"]:
-            # If the subject wasn't explicitly generated in the original breakdown, add it dynamically
-            self.profile["subjects"][subject] = {
+        subjects = self.profile["subjects"]
+        if subject not in subjects:
+            subjects[subject] = {
                 "status": "in_progress",
                 "score": 0,
                 "quizzes_taken": 0,
                 "quizzes_passed": 0
             }
 
-        subj_data = self.profile["subjects"][subject]
+        subj_data = subjects[subject]
         subj_data["quizzes_taken"] += 1
         
         old_score = subj_data.get("score", 0)
@@ -75,17 +103,30 @@ class StudentProfileManager:
         else:
             subj_data["status"] = "pending"
 
-        self.save_profile()
+        # Persist updated profile subjects to database
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                'UPDATE profile SET subjects = ? WHERE topic = ?',
+                (json.dumps(subjects), self.profile["topic"])
+            )
+            await db.commit()
+            
         return subj_data
 
-    def get_subject_mastery(self, subject: str) -> Optional[Dict[str, Any]]:
-        """Retrieves mastery metadata for a specific subject."""
+    async def get_subject_mastery(self, subject: str) -> Optional[Dict[str, Any]]:
+        """Asynchronously retrieves mastery metadata for a specific subject."""
+        if not self.profile:
+            await self.load_profile()
+            
         if self.profile and "subjects" in self.profile:
             return self.profile["subjects"].get(subject)
         return None
 
-    def get_profile_summary(self) -> str:
-        """Generates a human-friendly progress report of the student."""
+    async def get_profile_summary(self) -> str:
+        """Asynchronously generates a human-friendly progress report of the student."""
+        if not self.profile:
+            await self.load_profile()
+            
         if not self.profile:
             return "No active curriculum profile loaded."
         
@@ -95,8 +136,3 @@ class StudentProfileManager:
             status_emoji = "✅" if data["status"] == "mastered" else "📖" if data["status"] == "in_progress" else "⏳"
             summary += f"  - {status_emoji} {subj}: Mastery {data['score']}% (Quizzes: {data['quizzes_passed']}/{data['quizzes_taken']})\n"
         return summary
-
-    def save_profile(self) -> None:
-        """Persists the profile to disk."""
-        with open(self.file_path, "w", encoding="utf-8") as f:
-            json.dump(self.profile, f, indent=2)

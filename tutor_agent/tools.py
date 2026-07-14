@@ -26,8 +26,8 @@ class Quiz(BaseModel):
     explanation: str = Field(description="A brief explanation of why this option is correct.")
 
 
-def breakdown_topic(topic: str) -> List[str]:
-    """Queries Gemini to subdivide a large topic into a sequential list of subjects.
+async def breakdown_topic(topic: str) -> List[str]:
+    """Asynchronously queries Gemini to subdivide a large topic into a sequential list of subjects.
     
     Args:
         topic: The high-level topic to learn (e.g. "Python Programming").
@@ -39,7 +39,7 @@ def breakdown_topic(topic: str) -> List[str]:
     prompt = f"Break down the topic '{topic}' into a logical, sequential list of 3 to 5 important sub-topics for learning."
     
     try:
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model="gemini-3.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -50,21 +50,21 @@ def breakdown_topic(topic: str) -> List[str]:
         )
         curriculum = Curriculum.model_validate_json(response.text)
         
-        # Initialize student profile with these topics
+        # Initialize student profile with these topics asynchronously
         manager = StudentProfileManager()
-        manager.initialize_profile(topic, curriculum.subjects)
+        await manager.initialize_profile(topic, curriculum.subjects)
         
         return curriculum.subjects
     except Exception as e:
         # Graceful fallback curriculum in case of API issues
         fallback = [f"Introduction to {topic}", f"Intermediate concepts in {topic}", f"Advanced {topic}"]
         manager = StudentProfileManager()
-        manager.initialize_profile(topic, fallback)
+        await manager.initialize_profile(topic, fallback)
         return fallback
 
 
-def generate_quiz(subject: str, difficulty: str) -> Dict[str, Any]:
-    """Generates a dynamic, high-quality multiple choice quiz question for a subject.
+async def generate_quiz(subject: str, difficulty: str) -> Dict[str, Any]:
+    """Asynchronously generates a single high-quality multiple choice quiz question for a subject.
     
     Args:
         subject: The specific subject of the quiz.
@@ -81,7 +81,7 @@ def generate_quiz(subject: str, difficulty: str) -> Dict[str, Any]:
     )
     
     try:
-        response = client.models.generate_content(
+        response = await client.aio.models.generate_content(
             model="gemini-3.5-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
@@ -102,8 +102,8 @@ def generate_quiz(subject: str, difficulty: str) -> Dict[str, Any]:
         }
 
 
-def assess_understanding(subject: str, correct: bool) -> Dict[str, Any]:
-    """Evaluates user's quiz performance and updates their learning progress in memory.
+async def assess_understanding(subject: str, correct: bool) -> Dict[str, Any]:
+    """Asynchronously evaluates user's quiz performance and updates their learning progress in memory.
     
     Args:
         subject: The subject that was tested.
@@ -113,17 +113,17 @@ def assess_understanding(subject: str, correct: bool) -> Dict[str, Any]:
         A dictionary containing the updated subject progress details.
     """
     manager = StudentProfileManager()
-    manager.load_profile()
-    updated_subject = manager.update_subject_score(subject, correct)
+    await manager.load_profile()
+    updated_subject = await manager.update_subject_score(subject, correct)
     return updated_subject
 
 
-def get_progress_summary() -> str:
-    """Retrieves a friendly summary of the student's current curriculum and mastery levels.
+async def get_progress_summary() -> str:
+    """Asynchronously retrieves a friendly summary of the student's current curriculum and mastery levels.
     
     Returns:
         A formatted progress report string.
     """
     manager = StudentProfileManager()
-    manager.load_profile()
-    return manager.get_profile_summary()
+    await manager.load_profile()
+    return await manager.get_profile_summary()

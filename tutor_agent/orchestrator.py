@@ -1,4 +1,10 @@
+import os
 import google.adk as adk
+from google.adk.apps.app import App
+from google.adk.apps._configs import EventsCompactionConfig
+from google.adk.apps.llm_event_summarizer import LlmEventSummarizer
+from google.adk.models.google_llm import Gemini
+
 from tutor_agent.tools import (
     breakdown_topic,
     generate_quiz,
@@ -40,3 +46,25 @@ def create_tutor_agent() -> adk.Agent:
         ]
     )
     return agent
+
+def create_tutor_app() -> App:
+    """Creates and returns the ADK App with history compaction configured."""
+    agent = create_tutor_agent()
+    
+    # Configure the underlying LLM for compaction
+    base_url = os.environ.get("GOOGLE_GEMINI_BASE_URL")
+    llm = Gemini(model="gemini-3.5-flash", base_url=base_url)
+    
+    # Configure sliding window event compaction (History Compaction)
+    compaction_config = EventsCompactionConfig(
+        summarizer=LlmEventSummarizer(llm=llm),
+        compaction_interval=4,  # Compact every 4 dialog turns to save context tokens
+        overlap_size=1          # Overlap by 1 turn to retain immediate context
+    )
+    
+    app = App(
+        name="TutorApp",
+        root_agent=agent,
+        events_compaction_config=compaction_config
+    )
+    return app

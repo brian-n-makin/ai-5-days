@@ -11,7 +11,7 @@ import google.adk as adk
 from google.adk.runners import InMemoryRunner
 
 from tutor_agent.observability import setup_telemetry
-from tutor_agent.orchestrator import create_tutor_agent
+from tutor_agent.orchestrator import create_tutor_app
 from tutor_agent.memory import StudentProfileManager
 
 # Custom terminal color theme for rich console
@@ -43,6 +43,8 @@ async def repl_loop(runner: InMemoryRunner) -> None:
 
     while True:
         try:
+            # rich Prompt is synchronous, which is normal for CLI REPL loops.
+            # To keep things clean, we prompt synchronously, then run the async agent.
             user_input = Prompt.ask("\n[student]You[/student]")
             if user_input.strip().lower() in ["exit", "quit"]:
                 console.print("[info]Exiting. Good luck on your learning journey! 📖[/info]")
@@ -64,8 +66,8 @@ async def repl_loop(runner: InMemoryRunner) -> None:
             console.print("\n[info]Exiting. Good luck on your learning journey! 📖[/info]")
             break
 
-def main() -> None:
-    """Main CLI Entrypoint."""
+async def async_main() -> None:
+    """Async Main program logic."""
     # 1. Initialize Tracing & Observability
     setup_telemetry()
     
@@ -76,26 +78,31 @@ def main() -> None:
         border_style="gold3"
     ))
     
-    # 2. Check for existing curriculum profiles
+    # 2. Check for existing curriculum profiles asynchronously (Non-blocking DB operations)
     manager = StudentProfileManager()
-    profile = manager.load_profile()
+    profile = await manager.load_profile()
     
     if profile:
         console.print("[progress]Found existing learning profile:[/progress]")
-        console.print(manager.get_profile_summary())
+        summary = await manager.get_profile_summary()
+        console.print(summary)
         resume = Confirm.ask("Would you like to resume this learning session?", default=True)
         if not resume:
-            # Delete old profile to start fresh
-            if os.path.exists("student_profile.json"):
-                os.remove("student_profile.json")
-            console.print("[info]Cleared previous profile. Starting fresh![/info]")
+            # Delete old database to start fresh
+            if os.path.exists("student_profile.db"):
+                os.remove("student_profile.db")
+            console.print("[info]Cleared previous profile database. Starting fresh![/info]")
     
-    # 3. Create the ADK Agent & Runner
-    agent = create_tutor_agent()
-    runner = InMemoryRunner(agent=agent)
+    # 3. Create the ADK App & Runner with History Compaction Enabled
+    app = create_tutor_app()
+    runner = InMemoryRunner(app=app)
     
     # 4. Run the REPL loop
-    asyncio.run(repl_loop(runner))
+    await repl_loop(runner)
+
+def main() -> None:
+    """Main CLI Entrypoint."""
+    asyncio.run(async_main())
 
 if __name__ == "__main__":
     main()
