@@ -1,3 +1,4 @@
+import sys
 import unittest
 from unittest.mock import patch, AsyncMock, MagicMock
 from tutor_agent.tools import (
@@ -11,6 +12,14 @@ from tutor_agent.tools import (
 from tutor_agent.memory import StudentProfileManager
 
 class TestTools(unittest.IsolatedAsyncioTestCase):
+
+    def setUp(self):
+        # Prevent tests from hanging on human-in-the-loop prompts by mocking isatty
+        self.isatty_patcher = patch.object(sys.stdin, "isatty", return_value=False)
+        self.mock_isatty = self.isatty_patcher.start()
+
+    def tearDown(self):
+        self.isatty_patcher.stop()
 
     @patch("tutor_agent.tools.get_gemini_client")
     @patch("tutor_agent.tools.StudentProfileManager")
@@ -36,10 +45,12 @@ class TestTools(unittest.IsolatedAsyncioTestCase):
         mock_manager.initialize_profile.assert_called_once_with("Python", ["Variables", "Loops", "Functions"])
 
     @patch("tutor_agent.tools.get_gemini_client")
-    async def test_generate_quiz(self, mock_get_client):
+    @patch("tutor_agent.tools.verify_quiz_correctness", new_callable=AsyncMock)
+    async def test_generate_quiz(self, mock_verify, mock_get_client):
         # Setup mocks
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
+        mock_verify.return_value = True
         
         mock_response = MagicMock()
         mock_response.text = (
