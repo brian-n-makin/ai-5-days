@@ -32,6 +32,15 @@ jobs:
         # exit-zero treats all errors as warnings
         flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
 
-    - name: Run Tests
+    - name: Run Unit Tests
       run: |
-        pytest
+        python -m unittest discover tests
+
+    - name: Run Automated Evaluation Suite (Against Golden Dataset)
+      env:
+        # Secure injection of Gemini API Key for evaluation
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        # Suppress interactive confirmation prompts for non-blocking execution in CI
+        CI: "true"
+      run: |
+        python -m tutor_agent.eval_suite
